@@ -1,15 +1,7 @@
 // sw.js — 모닝 날씨 알리미 Service Worker
 
-const CACHE = 'weather-pwa-v1';
-
-// ── 설치 ───────────────────────────────────────────────
-self.addEventListener('install', e => {
-  self.skipWaiting();
-});
-
-self.addEventListener('activate', e => {
-  e.waitUntil(clients.claim());
-});
+self.addEventListener('install', () => self.skipWaiting());
+self.addEventListener('activate', e => e.waitUntil(clients.claim()));
 
 // ── 알림 클릭 시 앱 열기 ───────────────────────────────
 self.addEventListener('notificationclick', e => {
@@ -17,48 +9,52 @@ self.addEventListener('notificationclick', e => {
   e.waitUntil(
     clients.matchAll({ type: 'window', includeUncontrolled: true }).then(list => {
       if (list.length > 0) return list[0].focus();
-      return clients.openWindow('/');
+      return clients.openWindow('/weather-app/');
     })
   );
 });
 
-// ── 메인 페이지로부터 알람 메시지 수신 ─────────────────
+// ── 메인 페이지로부터 설정 저장 ───────────────────────
 self.addEventListener('message', e => {
-  if (e.data?.type === 'SCHEDULE_ALARM') {
-    const { timeStr, apiKey, city } = e.data;
-    scheduleAlarm(timeStr, apiKey, city);
-  }
-  if (e.data?.type === 'CANCEL_ALARMS') {
-    cancelAlarms();
+  if (e.data?.type === 'SAVE_CONFIG') {
+    // config를 SW 내부 변수에 저장
+    swConfig = e.data.config;
+    // 즉시 체크 루프 시작
+    startLoop();
   }
 });
 
-// ── 알람 스케줄러 ──────────────────────────────────────
-const alarmTimers = {};
+// ── SW 내부 상태 ──────────────────────────────────────
+let swConfig = null;  // { apiKey, city, schedules: ["07:30", ...] }
+let loopTimer = null;
+let firedToday = {};  // { "07:30": "2026-03-16" }  오늘 이미 보낸 알람 기록
 
-function cancelAlarms() {
-  Object.values(alarmTimers).forEach(id => clearTimeout(id));
-  for (const k in alarmTimers) delete alarmTimers[k];
+function startLoop() {
+  if (loopTimer) clearInterval(loopTimer);
+  // 매 30초마다 시간 체크
+  loopTimer = setInterval(checkAlarms, 30 * 1000);
+  checkAlarms(); // 즉시 1회 실행
 }
 
-function scheduleAlarm(timeStr, apiKey, city) {
-  if (alarmTimers[timeStr]) clearTimeout(alarmTimers[timeStr]);
+async function checkAlarms() {
+  if (!swConfig) return;
+  const { apiKey, city, schedules } = swConfig;
+  if (!schedules || schedules.length === 0) return;
 
   const now = new Date();
-  const [h, m] = timeStr.split(':').map(Number);
-  const target = new Date(now);
-  target.setHours(h, m, 0, 0);
-  if (target <= now) target.setDate(target.getDate() + 1);
-  const ms = target - now;
+  const hhmm = `${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}`;
+  const today = now.toISOString().slice(0, 10);
 
-  alarmTimers[timeStr] = setTimeout(async () => {
-    await fireWeatherNotification(apiKey, city);
-    // 24시간 뒤 재등록
-    alarmTimers[timeStr] = setTimeout(() => scheduleAlarm(timeStr, apiKey, city), 500);
-  }, ms);
+  for (const t of schedules) {
+    // 설정 시간과 현재 시간이 일치하고, 오늘 아직 안 보냈으면 발송
+    if (t === hhmm && firedToday[t] !== today) {
+      firedToday[t] = today;
+      await fireWeatherNotification(apiKey, city);
+    }
+  }
 }
 
-// ── 날씨 fetch & 알림 발송 ─────────────────────────────
+// ── 날씨 fetch & 알림 발송 ────────────────────────────
 async function fireWeatherNotification(apiKey, city) {
   try {
     const wRes = await fetch(
@@ -78,7 +74,7 @@ async function fireWeatherNotification(apiKey, city) {
     const feels = Math.round(w.main.feels_like);
     const desc  = w.weather[0].description;
     const outfit = getOutfit(temp, pm25);
-    const pmText = pm25 !== null ? `PM2.5 ${pm25.toFixed(1)}µg/m³ ${pmGrade(pm25)}` : '';
+    const pmText = pm25 !== null ? `PM2.5 ${pm25.toFixed(1)}µg/m³ ${pmGrade(pm25)}` : '미세먼지 정보 없음';
 
     await self.registration.showNotification(`☀️ ${w.name} 오늘의 날씨`, {
       body: `🌡 ${temp}°C (체감 ${feels}°C) · ${desc}\n💨 ${pmText}\n👗 ${outfit}`,
@@ -86,7 +82,8 @@ async function fireWeatherNotification(apiKey, city) {
       badge: 'https://openweathermap.org/img/wn/01d.png',
       tag: 'morning-weather',
       renotify: true,
-      requireInteraction: false
+      requireInteraction: false,
+      vibrate: [200, 100, 200]
     });
   } catch (err) {
     await self.registration.showNotification('모닝 날씨 알리미', {
@@ -105,7 +102,6 @@ function getOutfit(temp, pm25) {
   else if (temp >= 12) c = '자켓·후드티';
   else if (temp >= 6)  c = '코트·니트·머플러';
   else                 c = '패딩·방한용품';
-
   if (pm25 !== null && pm25 >= 35) c += ' + 마스크 필수';
   return c;
 }
