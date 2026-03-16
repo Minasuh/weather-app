@@ -278,7 +278,8 @@
   async function registerSW() {
     if (!('serviceWorker' in navigator)) return null;
     try {
-      const reg = await navigator.serviceWorker.register('sw.js');
+      const reg = await navigator.serviceWorker.register('/weather-app/sw.js', { scope: '/weather-app/' });
+      await navigator.serviceWorker.ready;
       swReg = reg;
       return reg;
     } catch(e) {
@@ -287,20 +288,13 @@
     }
   }
 
-  // ── 알람을 SW에 전달 ──────────────────────────────────
   async function syncSchedulesToSW() {
-    const reg = swReg || await registerSW();
-    if (!reg || !reg.active) return;
-    // 기존 알람 취소
-    reg.active.postMessage({ type: 'CANCEL_ALARMS' });
-    // 새 알람 등록
-    schedules.forEach(t => {
-      reg.active.postMessage({
-        type: 'SCHEDULE_ALARM',
-        timeStr: t,
-        apiKey,
-        city: cities[0] || 'Seoul'
-      });
+    if (!swReg) await registerSW();
+    const sw = navigator.serviceWorker.controller;
+    if (!sw) { setTimeout(syncSchedulesToSW, 1000); return; }
+    sw.postMessage({
+      type: 'SAVE_CONFIG',
+      config: { apiKey, city: cities[0] || 'Seoul', schedules }
     });
   }
 
